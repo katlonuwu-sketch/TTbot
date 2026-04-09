@@ -1,7 +1,7 @@
 import asyncio
 import random
-import os
 import aiohttp
+from io import BytesIO
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
@@ -12,6 +12,7 @@ from aiogram.types import (
     CallbackQuery,
     InputMediaPhoto
 )
+from aiogram.types.input_file import InputFile
 
 TOKEN = "8526452808:AAE19ub3ECJMzipHozNAuvKdkDr-K4EsMe4"
 
@@ -48,7 +49,6 @@ async def get_media(keywords="funny"):
         # -------- Фото --------
         image_urls = []
 
-        # 1. "images" — список ссылок или словарей
         for img in item.get("images", []):
             if isinstance(img, dict):
                 url_img = img.get("url") or img.get("origin_url") or img.get("image")
@@ -57,7 +57,6 @@ async def get_media(keywords="funny"):
             if url_img:
                 image_urls.append(url_img)
 
-        # 2. "image_post_info.images" — альтернатива
         for img in item.get("image_post_info", {}).get("images", []):
             if isinstance(img, dict):
                 url_img = img.get("url") or img.get("origin_url") or img.get("image")
@@ -66,7 +65,6 @@ async def get_media(keywords="funny"):
             if url_img and url_img not in image_urls:
                 image_urls.append(url_img)
 
-        # Добавляем в альбом
         if image_urls:
             media.append({
                 "type": "album",
@@ -173,25 +171,20 @@ async def send_media(chat_id, user_id, tags):
     item = random.choice(new_items)
     used_media[chat_id].add(get_key(item))
 
-    # -------- ВИДЕО --------
+    # -------- ВИДЕО через поток --------
     if item["type"] == "video":
-        filename = f"video_{chat_id}_{random.randint(0,10000)}.mp4"
-
         try:
-            process = await asyncio.create_subprocess_exec(
-                "yt-dlp", "-o", filename, item["url"],
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE
-            )
-            await process.communicate()
-
-            if os.path.exists(filename):
-                video = FSInputFile(filename)
-                await bot.send_video(chat_id, video, reply_markup=get_next_keyboard(tags))
-
-        finally:
-            if os.path.exists(filename):
-                os.remove(filename)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(item["url"]) as resp:
+                    if resp.status == 200:
+                        video_bytes = await resp.read()
+                        video_file = BytesIO(video_bytes)
+                        video_file.name = "video.mp4"
+                        await bot.send_video(chat_id, InputFile(video_file), reply_markup=get_next_keyboard(tags))
+                    else:
+                        await bot.send_message(chat_id, "Не удалось загрузить видео 😢")
+        except Exception as e:
+            await bot.send_message(chat_id, f"Ошибка при загрузке видео: {e}")
 
     # -------- АЛЬБОМ --------
     elif item["type"] == "album":
