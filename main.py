@@ -20,12 +20,15 @@ TOKEN = "8526452808:AAE19ub3ECJMzipHozNAuvKdkDr-K4EsMe4"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# История и предпочтения
+# ================== ДАННЫЕ ==================
+
 used_media = defaultdict(set)
 user_preferences = defaultdict(lambda: {
     "likes": defaultdict(int),
     "dislikes": defaultdict(int)
 })
+
+media_cache = {}  # media_id -> item
 
 
 # ================== API ==================
@@ -46,7 +49,7 @@ async def get_media(keywords="funny"):
     for item in data.get("data", {}).get("videos", []):
         tags = item.get("title", "").lower().split()
 
-        # Видео
+        # 📹 Видео
         if item.get("play"):
             media.append({
                 "type": "video",
@@ -54,7 +57,7 @@ async def get_media(keywords="funny"):
                 "tags": tags
             })
 
-        # Альбом
+        # 📸 Альбом
         images = item.get("images") or item.get("image_post_info", {}).get("images", [])
 
         image_urls = []
@@ -77,7 +80,7 @@ async def get_media(keywords="funny"):
     return media
 
 
-# ================== УМНЫЙ ВЫБОР ==================
+# ================== AI РЕКОМЕНДАЦИИ ==================
 
 def score_item(user_id, item):
     prefs = user_preferences[user_id]
@@ -87,9 +90,7 @@ def score_item(user_id, item):
         score += prefs["likes"][tag] * 2
         score -= prefs["dislikes"][tag] * 3
 
-    # немного рандома чтобы не зацикливался
     score += random.uniform(0, 1)
-
     return score
 
 
@@ -105,14 +106,14 @@ def pick_best(user_id, items):
 
 # ================== КНОПКИ ==================
 
-def get_keyboard(tags):
+def get_keyboard(media_id):
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="👍", callback_data=f"like:{tags}"),
-            InlineKeyboardButton(text="👎", callback_data=f"dislike:{tags}")
+            InlineKeyboardButton(text="👍", callback_data=f"like:{media_id}"),
+            InlineKeyboardButton(text="👎", callback_data=f"dislike:{media_id}")
         ],
         [
-            InlineKeyboardButton(text="➡️ Дальше", callback_data=f"next:{tags}")
+            InlineKeyboardButton(text="➡️ Дальше", callback_data=f"next:{media_id}")
         ]
     ])
 
@@ -141,17 +142,27 @@ async def handle_t(message: Message):
 
 @dp.callback_query(F.data.startswith("next:"))
 async def next_media(callback: CallbackQuery):
-    tags = callback.data.split(":", 1)[1]
+    media_id = callback.data.split(":")[1]
+    item = media_cache.get(media_id)
+
+    if not item:
+        return await callback.answer("Старое сообщение")
+
     await callback.answer()
-    await send_media(callback.message.chat.id, tags)
+    await send_media(callback.message.chat.id, " ".join(item["tags"]))
 
 
 @dp.callback_query(F.data.startswith("like:"))
 async def like(callback: CallbackQuery):
-    tags = callback.data.split(":", 1)[1].split()
+    media_id = callback.data.split(":")[1]
+    item = media_cache.get(media_id)
+
+    if not item:
+        return await callback.answer("Старое сообщение")
+
     user_id = callback.from_user.id
 
-    for t in tags:
+    for t in item["tags"]:
         user_preferences[user_id]["likes"][t] += 1
 
     await callback.answer("👍 Учту")
@@ -159,10 +170,15 @@ async def like(callback: CallbackQuery):
 
 @dp.callback_query(F.data.startswith("dislike:"))
 async def dislike(callback: CallbackQuery):
-    tags = callback.data.split(":", 1)[1].split()
+    media_id = callback.data.split(":")[1]
+    item = media_cache.get(media_id)
+
+    if not item:
+        return await callback.answer("Старое сообщение")
+
     user_id = callback.from_user.id
 
-    for t in tags:
+    for t in item["tags"]:
         user_preferences[user_id]["dislikes"][t] += 1
 
     await callback.answer("👎 Понял")
@@ -172,9 +188,6 @@ async def dislike(callback: CallbackQuery):
 
 async def send_media(chat_id, tags):
     media_list = await get_media(tags)
-
-    if chat_id not in used_media:
-        used_media[chat_id] = set()
 
     def get_key(item):
         if item["type"] == "video":
@@ -192,9 +205,12 @@ async def send_media(chat_id, tags):
         await bot.send_message(chat_id, "Ничего не нашёл 😢")
         return
 
-    # 🧠 ВЫБОР ЛУЧШЕГО
     item = pick_best(chat_id, new_items)
     used_media[chat_id].add(get_key(item))
+
+    # 🔑 создаём ID
+    media_id = str(random.randint(100000, 999999))
+    media_cache[media_id] = item
 
     # 📹 Видео
     if item["type"] == "video":
@@ -206,18 +222,18 @@ async def send_media(chat_id, tags):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            stdout, stderr = await process.communicate()
+            await process.communicate()
 
-            if process.returncode != 0:
-                await bot.send_message(chat_id, f"Ошибка загрузки:\n{stderr.decode()}")
-                return
+            if os.path.exists(filename):
+                video = FSInputFile(filename)
+                await bot.send_video(
+                    chat_id,
+                    video,
+                    reply_markup=get_keyboard(media_id)
+                )
 
-            video = FSInputFile(filename)
-            await bot.send_video(
-                chat_id,
-                video,
-                reply_markup=get_keyboard(" ".join(item["tags"]))
-            )
+        except Exception as e:
+            await bot.send_message(chat_id, f"Ошибка: {e}")
 
         finally:
             if os.path.exists(filename):
@@ -236,7 +252,7 @@ async def send_media(chat_id, tags):
             await bot.send_message(
                 chat_id,
                 "Оцени 👇",
-                reply_markup=get_keyboard(" ".join(item["tags"]))
+                reply_markup=get_keyboard(media_id)
             )
 
         except Exception as e:
@@ -246,6 +262,8 @@ async def send_media(chat_id, tags):
 # ================== ЗАПУСК ==================
 
 async def main():
+    # фикс конфликта
+    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
