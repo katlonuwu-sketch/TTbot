@@ -47,14 +47,13 @@ async def get_media(keywords="funny"):
 
         # фото
         images = item.get("images") or item.get("image_post_info", {}).get("images", [])
-
         image_urls = []
+
         for img in images:
             if isinstance(img, dict):
                 img_url = img.get("url") or img.get("image")
             else:
                 img_url = img
-
             if img_url:
                 image_urls.append(img_url)
 
@@ -186,12 +185,15 @@ async def send_media(chat_id, user_id, tags):
 
     # -------- АЛЬБОМ --------
     elif item["type"] == "album":
-        try:
-            media_group = [
-                InputMediaPhoto(media=url)
-                for url in item["urls"][:10]
-            ]
+        urls = [url if isinstance(url, str) else url.get("url") for url in item["urls"]]
+        urls = [u for u in urls if u]  # удалить None
 
+        if not urls:
+            await bot.send_message(chat_id, "Нет доступных фото 😢")
+            return
+
+        try:
+            media_group = [InputMediaPhoto(media=u) for u in urls[:10]]
             await bot.send_media_group(chat_id, media_group)
             await bot.send_message(chat_id, "➡️ Дальше", reply_markup=get_next_keyboard(tags))
 
