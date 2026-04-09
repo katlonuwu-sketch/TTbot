@@ -38,25 +38,35 @@ async def get_media(keywords="funny"):
     media = []
 
     for item in data.get("data", {}).get("videos", []):
-        # видео
+        # -------- Видео --------
         if item.get("play"):
             media.append({
                 "type": "video",
                 "url": item["play"]
             })
 
-        # фото
-        images = item.get("images") or item.get("image_post_info", {}).get("images", [])
+        # -------- Фото --------
         image_urls = []
 
-        for img in images:
+        # 1. "images" — список ссылок или словарей
+        for img in item.get("images", []):
             if isinstance(img, dict):
-                img_url = img.get("url") or img.get("image")
+                url_img = img.get("url") or img.get("origin_url") or img.get("image")
             else:
-                img_url = img
-            if img_url:
-                image_urls.append(img_url)
+                url_img = img
+            if url_img:
+                image_urls.append(url_img)
 
+        # 2. "image_post_info.images" — альтернатива
+        for img in item.get("image_post_info", {}).get("images", []):
+            if isinstance(img, dict):
+                url_img = img.get("url") or img.get("origin_url") or img.get("image")
+            else:
+                url_img = img
+            if url_img and url_img not in image_urls:
+                image_urls.append(url_img)
+
+        # Добавляем в альбом
         if image_urls:
             media.append({
                 "type": "album",
