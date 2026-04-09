@@ -3,8 +3,6 @@ import random
 import os
 import aiohttp
 
-from collections import defaultdict
-
 from aiogram import Bot, Dispatcher, F
 from aiogram.types import (
     Message,
@@ -20,18 +18,9 @@ TOKEN = "8526452808:AAE19ub3ECJMzipHozNAuvKdkDr-K4EsMe4"
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# ================== ДАННЫЕ ==================
+# История отправленного
+used_media = {}  # chat_id -> set()
 
-used_media = defaultdict(set)
-user_preferences = defaultdict(lambda: {
-    "likes": defaultdict(int),
-    "dislikes": defaultdict(int)
-})
-
-media_cache = {}  # media_id -> item
-
-
-# ================== API ==================
 
 async def get_media(keywords="funny"):
     url = "https://www.tikwm.com/api/feed/search"
@@ -47,17 +36,14 @@ async def get_media(keywords="funny"):
     media = []
 
     for item in data.get("data", {}).get("videos", []):
-        tags = item.get("title", "").lower().split()
-
         # 📹 Видео
         if item.get("play"):
             media.append({
                 "type": "video",
-                "url": item["play"],
-                "tags": tags
+                "url": item["play"]
             })
 
-        # 📸 Альбом
+        # 📸 Фото-пост (альбом)
         images = item.get("images") or item.get("image_post_info", {}).get("images", [])
 
         image_urls = []
@@ -73,68 +59,34 @@ async def get_media(keywords="funny"):
         if image_urls:
             media.append({
                 "type": "album",
-                "urls": image_urls,
-                "tags": tags
+                "urls": image_urls
             })
 
     return media
 
 
-# ================== AI РЕКОМЕНДАЦИИ ==================
-
-def score_item(user_id, item):
-    prefs = user_preferences[user_id]
-    score = 0
-
-    for tag in item["tags"]:
-        score += prefs["likes"][tag] * 2
-        score -= prefs["dislikes"][tag] * 3
-
-    score += random.uniform(0, 1)
-    return score
-
-
-def pick_best(user_id, items):
-    if not items:
-        return None
-
-    scored = [(score_item(user_id, i), i) for i in items]
-    scored.sort(key=lambda x: x[0], reverse=True)
-
-    return scored[0][1]
-
-
-# ================== КНОПКИ ==================
-
-def get_keyboard(media_id):
+def get_keyboard(tags):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="👍", callback_data=f"like:{media_id}"),
-            InlineKeyboardButton(text="👎", callback_data=f"dislike:{media_id}")
-        ],
-        [
-            InlineKeyboardButton(text="➡️ Дальше", callback_data=f"next:{media_id}")
-        ]
+        [InlineKeyboardButton(text="➡️ Дальше", callback_data=f"next:{tags}")]
     ])
 
-
-# ================== ХЕНДЛЕРЫ ==================
 
 @dp.message(F.text == "/start")
 async def start(message: Message):
     await message.answer(
-        "🔥 Умный TikTok бот\n\n"
-        "/tt <запрос>\n\n"
-        "Жми 👍 или 👎 чтобы я учился"
+        "Используй команду:\n"
+        "/tt <хештег>\n\n"
+        "Пример:\n"
+        "/tt funny cats"
     )
 
 
 @dp.message(F.text.startswith("/tt "))
-async def handle_t(message: Message):
+async def handle_t_command(message: Message):
     tags = message.text[3:].strip().replace("#", "")
 
     if not tags:
-        await message.answer("Напиши что искать 😢")
+        await message.answer("Укажи хештег 😢")
         return
 
     await send_media(message.chat.id, tags)
@@ -142,53 +94,18 @@ async def handle_t(message: Message):
 
 @dp.callback_query(F.data.startswith("next:"))
 async def next_media(callback: CallbackQuery):
-    media_id = callback.data.split(":")[1]
-    item = media_cache.get(media_id)
-
-    if not item:
-        return await callback.answer("Старое сообщение")
-
+    tags = callback.data.split(":")[1]
     await callback.answer()
-    await send_media(callback.message.chat.id, " ".join(item["tags"]))
+    await send_media(callback.message.chat.id, tags)
 
-
-@dp.callback_query(F.data.startswith("like:"))
-async def like(callback: CallbackQuery):
-    media_id = callback.data.split(":")[1]
-    item = media_cache.get(media_id)
-
-    if not item:
-        return await callback.answer("Старое сообщение")
-
-    user_id = callback.from_user.id
-
-    for t in item["tags"]:
-        user_preferences[user_id]["likes"][t] += 1
-
-    await callback.answer("👍 Учту")
-
-
-@dp.callback_query(F.data.startswith("dislike:"))
-async def dislike(callback: CallbackQuery):
-    media_id = callback.data.split(":")[1]
-    item = media_cache.get(media_id)
-
-    if not item:
-        return await callback.answer("Старое сообщение")
-
-    user_id = callback.from_user.id
-
-    for t in item["tags"]:
-        user_preferences[user_id]["dislikes"][t] += 1
-
-    await callback.answer("👎 Понял")
-
-
-# ================== ОТПРАВКА ==================
 
 async def send_media(chat_id, tags):
     media_list = await get_media(tags)
 
+    if chat_id not in used_media:
+        used_media[chat_id] = set()
+
+    # фильтр повторов
     def get_key(item):
         if item["type"] == "video":
             return item["url"]
@@ -205,12 +122,8 @@ async def send_media(chat_id, tags):
         await bot.send_message(chat_id, "Ничего не нашёл 😢")
         return
 
-    item = pick_best(chat_id, new_items)
+    item = random.choice(new_items)
     used_media[chat_id].add(get_key(item))
-
-    # 🔑 создаём ID
-    media_id = str(random.randint(100000, 999999))
-    media_cache[media_id] = item
 
     # 📹 Видео
     if item["type"] == "video":
@@ -222,15 +135,15 @@ async def send_media(chat_id, tags):
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE
             )
-            await process.communicate()
+            stdout, stderr = await process.communicate()
+
+            if process.returncode != 0:
+                await bot.send_message(chat_id, f"Ошибка загрузки:\n{stderr.decode()}")
+                return
 
             if os.path.exists(filename):
                 video = FSInputFile(filename)
-                await bot.send_video(
-                    chat_id,
-                    video,
-                    reply_markup=get_keyboard(media_id)
-                )
+                await bot.send_video(chat_id, video, reply_markup=get_keyboard(tags))
 
         except Exception as e:
             await bot.send_message(chat_id, f"Ошибка: {e}")
@@ -239,31 +152,24 @@ async def send_media(chat_id, tags):
             if os.path.exists(filename):
                 os.remove(filename)
 
-    # 📸 Альбом
+    # 📸 Альбом (несколько фото)
     elif item["type"] == "album":
         try:
-            media_group = [
-                InputMediaPhoto(media=url)
-                for url in item["urls"][:10]
-            ]
+            media_group = []
+
+            for url in item["urls"][:10]:  # максимум 10
+                media_group.append(InputMediaPhoto(media=url))
 
             await bot.send_media_group(chat_id, media_group)
 
-            await bot.send_message(
-                chat_id,
-                "Оцени 👇",
-                reply_markup=get_keyboard(media_id)
-            )
+            # кнопка отдельно
+            await bot.send_message(chat_id, "➡️ Дальше", reply_markup=get_keyboard(tags))
 
         except Exception as e:
-            await bot.send_message(chat_id, f"Ошибка: {e}")
+            await bot.send_message(chat_id, f"Ошибка альбома: {e}")
 
-
-# ================== ЗАПУСК ==================
 
 async def main():
-    # фикс конфликта
-    await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
 
