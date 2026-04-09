@@ -13,7 +13,7 @@ from aiogram.types import (
     InputMediaPhoto
 )
 
-TOKEN = "ТВОЙ_ТОКЕН_ЗДЕСЬ"
+TOKEN = "8526452808:AAE19ub3ECJMzipHozNAuvKdkDr-K4EsMe4"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
