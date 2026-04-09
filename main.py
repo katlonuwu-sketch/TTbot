@@ -2,119 +2,248 @@ import asyncio
 import random
 import os
 import aiohttp
-import subprocess
+
+from collections import defaultdict
 
 from aiogram import Bot, Dispatcher, F
-from aiogram.types import Message, FSInputFile, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
+from aiogram.types import (
+    Message,
+    FSInputFile,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,
+    CallbackQuery,
+    InputMediaPhoto
+)
 
-# Вставьте сюда новый токен от @BotFather
 TOKEN = "8526452808:AAE19ub3ECJMzipHozNAuvKdkDr-K4EsMe4"
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
 
-# История видео для каждого пользователя
-used_videos = {}  # chat_id -> set()
+# История и предпочтения
+used_media = defaultdict(set)
+user_preferences = defaultdict(lambda: {
+    "likes": defaultdict(int),
+    "dislikes": defaultdict(int)
+})
 
 
-async def get_videos(keywords="funny"):
+# ================== API ==================
+
+async def get_media(keywords="funny"):
     url = "https://www.tikwm.com/api/feed/search"
     params = {"keywords": keywords, "count": 30}
 
-    ssl_context = False  # Отключаем проверку SSL для TikWM
-
     async with aiohttp.ClientSession() as session:
         try:
-            async with session.get(url, params=params, ssl=ssl_context, timeout=10) as resp:
+            async with session.get(url, params=params, ssl=False, timeout=10) as resp:
                 data = await resp.json()
         except Exception:
             return []
 
-    videos = []
-    for item in data.get("data", {}).get("videos", []):
-        play_url = item.get("play")
-        if play_url:
-            videos.append(play_url)
-    return videos
+    media = []
 
+    for item in data.get("data", {}).get("videos", []):
+        tags = item.get("title", "").lower().split()
+
+        # Видео
+        if item.get("play"):
+            media.append({
+                "type": "video",
+                "url": item["play"],
+                "tags": tags
+            })
+
+        # Альбом
+        images = item.get("images") or item.get("image_post_info", {}).get("images", [])
+
+        image_urls = []
+        for img in images:
+            if isinstance(img, dict):
+                img_url = img.get("url") or img.get("image")
+            else:
+                img_url = img
+
+            if img_url:
+                image_urls.append(img_url)
+
+        if image_urls:
+            media.append({
+                "type": "album",
+                "urls": image_urls,
+                "tags": tags
+            })
+
+    return media
+
+
+# ================== УМНЫЙ ВЫБОР ==================
+
+def score_item(user_id, item):
+    prefs = user_preferences[user_id]
+    score = 0
+
+    for tag in item["tags"]:
+        score += prefs["likes"][tag] * 2
+        score -= prefs["dislikes"][tag] * 3
+
+    # немного рандома чтобы не зацикливался
+    score += random.uniform(0, 1)
+
+    return score
+
+
+def pick_best(user_id, items):
+    if not items:
+        return None
+
+    scored = [(score_item(user_id, i), i) for i in items]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    return scored[0][1]
+
+
+# ================== КНОПКИ ==================
 
 def get_keyboard(tags):
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➡️ Дальше", callback_data=f"next:{tags}")]
+        [
+            InlineKeyboardButton(text="👍", callback_data=f"like:{tags}"),
+            InlineKeyboardButton(text="👎", callback_data=f"dislike:{tags}")
+        ],
+        [
+            InlineKeyboardButton(text="➡️ Дальше", callback_data=f"next:{tags}")
+        ]
     ])
 
 
+# ================== ХЕНДЛЕРЫ ==================
+
 @dp.message(F.text == "/start")
 async def start(message: Message):
-    await message.answer("Используй команду /tt <хештег>, чтобы получить видео.\nНапример: /tt funny cats")
+    await message.answer(
+        "🔥 Умный TikTok бот\n\n"
+        "/tt <запрос>\n\n"
+        "Жми 👍 или 👎 чтобы я учился"
+    )
 
 
 @dp.message(F.text.startswith("/tt "))
-async def handle_t_command(message: Message):
+async def handle_t(message: Message):
     tags = message.text[3:].strip().replace("#", "")
+
     if not tags:
-        await message.answer("Пожалуйста, укажи хештеги после команды /tt")
+        await message.answer("Напиши что искать 😢")
         return
-    await send_video(message.chat.id, tags)
+
+    await send_media(message.chat.id, tags)
 
 
 @dp.callback_query(F.data.startswith("next:"))
-async def next_video(callback: CallbackQuery):
-    tags = callback.data.split(":")[1]
+async def next_media(callback: CallbackQuery):
+    tags = callback.data.split(":", 1)[1]
     await callback.answer()
-    await send_video(callback.message.chat.id, tags)
+    await send_media(callback.message.chat.id, tags)
 
 
-async def send_video(chat_id, tags):
-    videos = await get_videos(tags)
+@dp.callback_query(F.data.startswith("like:"))
+async def like(callback: CallbackQuery):
+    tags = callback.data.split(":", 1)[1].split()
+    user_id = callback.from_user.id
 
-    if chat_id not in used_videos:
-        used_videos[chat_id] = set()
+    for t in tags:
+        user_preferences[user_id]["likes"][t] += 1
 
-    new_videos = [v for v in videos if v not in used_videos[chat_id]]
+    await callback.answer("👍 Учту")
 
-    if not new_videos:
-        used_videos[chat_id].clear()
-        new_videos = videos
 
-    if not new_videos:
-        await bot.send_message(chat_id, "Не нашёл видео 😢")
+@dp.callback_query(F.data.startswith("dislike:"))
+async def dislike(callback: CallbackQuery):
+    tags = callback.data.split(":", 1)[1].split()
+    user_id = callback.from_user.id
+
+    for t in tags:
+        user_preferences[user_id]["dislikes"][t] += 1
+
+    await callback.answer("👎 Понял")
+
+
+# ================== ОТПРАВКА ==================
+
+async def send_media(chat_id, tags):
+    media_list = await get_media(tags)
+
+    if chat_id not in used_media:
+        used_media[chat_id] = set()
+
+    def get_key(item):
+        if item["type"] == "video":
+            return item["url"]
+        else:
+            return tuple(item["urls"])
+
+    new_items = [m for m in media_list if get_key(m) not in used_media[chat_id]]
+
+    if not new_items:
+        used_media[chat_id].clear()
+        new_items = media_list
+
+    if not new_items:
+        await bot.send_message(chat_id, "Ничего не нашёл 😢")
         return
 
-    url = random.choice(new_videos)
-    used_videos[chat_id].add(url)
+    # 🧠 ВЫБОР ЛУЧШЕГО
+    item = pick_best(chat_id, new_items)
+    used_media[chat_id].add(get_key(item))
 
-    filename = f"video_{chat_id}_{random.randint(0,10000)}.mp4"
+    # 📹 Видео
+    if item["type"] == "video":
+        filename = f"video_{chat_id}_{random.randint(0,10000)}.mp4"
 
-    try:
-        # Загружаем видео через yt-dlp с проверкой ошибок
-        process = await asyncio.create_subprocess_exec(
-            "yt-dlp", "-o", filename, url,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE
-        )
-        stdout, stderr = await process.communicate()
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "yt-dlp", "-o", filename, item["url"],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE
+            )
+            stdout, stderr = await process.communicate()
 
-        if process.returncode != 0:
-            await bot.send_message(chat_id, f"Ошибка загрузки видео:\n{stderr.decode()}")
-            return
+            if process.returncode != 0:
+                await bot.send_message(chat_id, f"Ошибка загрузки:\n{stderr.decode()}")
+                return
 
-        # Проверяем размер файла (Telegram ограничивает до 50 МБ для бота)
-        if os.path.getsize(filename) > 50 * 1024 * 1024:
-            await bot.send_message(chat_id, "Видео слишком большое для отправки через бота.")
-            return
+            video = FSInputFile(filename)
+            await bot.send_video(
+                chat_id,
+                video,
+                reply_markup=get_keyboard(" ".join(item["tags"]))
+            )
 
-        # Отправляем видео
-        video = FSInputFile(filename)
-        await bot.send_video(chat_id, video, reply_markup=get_keyboard(tags))
+        finally:
+            if os.path.exists(filename):
+                os.remove(filename)
 
-    except Exception as e:
-        await bot.send_message(chat_id, f"Ошибка: {e}")
+    # 📸 Альбом
+    elif item["type"] == "album":
+        try:
+            media_group = [
+                InputMediaPhoto(media=url)
+                for url in item["urls"][:10]
+            ]
 
-    finally:
-        if os.path.exists(filename):
-            os.remove(filename)
+            await bot.send_media_group(chat_id, media_group)
 
+            await bot.send_message(
+                chat_id,
+                "Оцени 👇",
+                reply_markup=get_keyboard(" ".join(item["tags"]))
+            )
+
+        except Exception as e:
+            await bot.send_message(chat_id, f"Ошибка: {e}")
+
+
+# ================== ЗАПУСК ==================
 
 async def main():
     await dp.start_polling(bot)
